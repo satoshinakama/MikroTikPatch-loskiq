@@ -2,16 +2,12 @@ name: Patch v7
 
 on:
   workflow_dispatch:
-    inputs:
-      preferred_version:
-        description: "Enter the RouterOS version (e.g., 7.16.2). Leave empty for latest."
-        required: false
-        type: string
 
 permissions:
   contents: write
 
 env:
+  ROUTEROS_VERSION: 17.19.2
   MIKRO_NPK_SIGN_PUBLIC_KEY: C293CED638A2A33C681FC8DE98EE26C54EADC5390C2DFCE197D35C83C416CF59
   MIKRO_LICENSE_PUBLIC_KEY: 8E1067E4305FCDC0CFBF95C10F96E5DFE8C49AEF486BD1A4E2E96C27F01E3E32
   CUSTOM_NPK_SIGN_PRIVATE_KEY: 7D008D9B80B036FB0205601FEE79D550927EBCA937B7008CC877281F2F8AC640
@@ -41,20 +37,6 @@ jobs:
         sudo apt-get install -y mkisofs xorriso qemu-utils extlinux --no-install-recommends
         sudo pip install -r requirements.txt
 
-    - name: Set RouterOS Version
-      id: set_version
-      run: |
-        if [[ -n "${{ github.event.inputs.preferred_version }}" ]]; then
-          VERSION=${{ github.event.inputs.preferred_version }}
-          echo "Using specified version: $VERSION"
-        else
-          NEWEST=$(curl -s https://upgrade.mikrotik.com/routeros/NEWESTa7.stable)
-          VERSION=$(echo "$NEWEST" | cut -d' ' -f1)
-          echo "Using latest version: $VERSION"
-        fi
-        echo "ROUTEROS_VERSION=$VERSION" >> $GITHUB_ENV
-        echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
-
     - name: Cache mikrotik-${{ env.ROUTEROS_VERSION }}${{ matrix.arch }}.iso
       id: cache_mikrotik
       uses: actions/cache@v4
@@ -65,7 +47,7 @@ jobs:
     - name: Get mikrotik-${{ env.ROUTEROS_VERSION }}${{ matrix.arch }}.iso
       if: steps.cache_mikrotik.outputs.cache-hit != 'true' && (matrix.arch == 'x86' || matrix.arch == 'arm64')
       run: |
-        sudo curl -s -o mikrotik.iso https://download.mikrotik.com/routeros/$ROUTEROS_VERSION/mikrotik-$ROUTEROS_VERSION${{ matrix.arch }}.iso
+        sudo curl -s -o mikrotik.iso https://download.mikrotik.com/routeros/${{ env.ROUTEROS_VERSION }}/mikrotik-${{ env.ROUTEROS_VERSION }}${{ matrix.arch }}.iso
 
     - name: Patch mikrotik-${{ env.ROUTEROS_VERSION }}${{ matrix.arch }}.iso
       if: matrix.arch == 'x86' || matrix.arch == 'arm64'
@@ -81,7 +63,7 @@ jobs:
         for file in $NPK_FILES; do
           sudo -E python3 patch.py npk $file
         done
-        sudo cp new_iso/routeros-$ROUTEROS_VERSION*.npk routeros-$ROUTEROS_VERSION${{ matrix.arch }}-patched.npk
+        sudo cp new_iso/routeros-${{ env.ROUTEROS_VERSION }}*.npk routeros-${{ env.ROUTEROS_VERSION }}${{ matrix.arch }}-patched.npk
 
     - name: Create Release tag ${{ env.ROUTEROS_VERSION }}
       uses: softprops/action-gh-release@v2

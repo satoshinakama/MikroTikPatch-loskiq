@@ -2,11 +2,17 @@ name: Patch v7
 
 on:
   workflow_dispatch:
+    inputs:
+      preferred_version:
+        description: "Enter the RouterOS version (e.g., 17.19.2). Leave empty for default (17.19.2)."
+        required: false
+        type: string
 
 permissions:
   contents: write
 
 env:
+  # Keys
   MIKRO_NPK_SIGN_PUBLIC_KEY: C293CED638A2A33C681FC8DE98EE26C54EADC5390C2DFCE197D35C83C416CF59
   MIKRO_LICENSE_PUBLIC_KEY: 8E1067E4305FCDC0CFBF95C10F96E5DFE8C49AEF486BD1A4E2E96C27F01E3E32
   CUSTOM_NPK_SIGN_PRIVATE_KEY: 7D008D9B80B036FB0205601FEE79D550927EBCA937B7008CC877281F2F8AC640
@@ -33,112 +39,70 @@ jobs:
     - name: Install dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y mkisofs xorriso qemu-utils extlinux unzip zip --no-install-recommends
+        sudo apt-get install -y mkisofs xorriso qemu-utils extlinux --no-install-recommends
         sudo pip install -r requirements.txt
 
-    - name: Check latest version
-      id: get_latest
+    - name: Set RouterOS Version
+      id: set_version
       run: |
-        echo $(uname -a)
-        NEWEST=$(curl -s https://upgrade.mikrotik.com/routeros/NEWESTa7.stable)
-        LATEST_VERSION=$(echo "$NEWEST" | cut -d' ' -f1)
-        BUILD_TIME=$(echo "$NEWEST" | cut -d' ' -f2)
-        echo "Latest Version: $LATEST_VERSION"
-        echo "Build Time: $BUILD_TIME"
-
-        # Handle first run if latest7.txt missing
-        if [ -f latest7.txt ]; then
-          _LATEST_VERSION=$(cut -d ' ' -f1 latest7.txt)
+        if [[ -n "${{ github.event.inputs.preferred_version }}" ]]; then
+          VERSION=${{ github.event.inputs.preferred_version }}
+          echo "Using specified version: $VERSION"
         else
-          _LATEST_VERSION=""
+          VERSION="17.19.2"
+          echo "Using default version: $VERSION"
         fi
+        echo "ROUTEROS_VERSION=$VERSION" >> $GITHUB_ENV
+        echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
 
-        if [ "$_LATEST_VERSION" == "$LATEST_VERSION" ]; then
-          echo "No new version found"
-          echo "has_new_version=false" >> $GITHUB_OUTPUT
-          exit 0
-        fi
-
-        echo "has_new_version=true" >> $GITHUB_OUTPUT
-        curl -s -o CHANGELOG https://upgrade.mikrotik.com/routeros/$LATEST_VERSION/CHANGELOG
-        cat CHANGELOG
-        echo "LATEST_VERSION=$LATEST_VERSION" >> $GITHUB_ENV
-
-        case "${{ matrix.arch }}" in
-          x86)    ARCH="" ;;
-          arm)    ARCH="-arm" ;;
-          arm64)  ARCH="-arm64" ;;
-          mipsbe) ARCH="-mipsbe" ;;
-          mmips)  ARCH="-mmips" ;;
-          smips)  ARCH="-smips" ;;
-          ppc)    ARCH="-ppc" ;;
-        esac
-        echo "ARCH=$ARCH" >> $GITHUB_ENV
-
-    - name: Cache mikrotik iso
-      if: steps.get_latest.outputs.has_new_version == 'true' && (matrix.arch == 'x86' || matrix.arch == 'arm64')
+    - name: Cache mikrotik-${{ env.ROUTEROS_VERSION }}${{ matrix.arch }}.iso
       id: cache_mikrotik
       uses: actions/cache@v4
       with:
         path: mikrotik.iso
-        key: mikrotik-${{ env.LATEST_VERSION }}-${{ env.ARCH }}
+        key: mikrotik-${{ env.ROUTEROS_VERSION }}-${{ matrix.arch }}
 
-    - name: Get mikrotik iso
-      if: steps.get_latest.outputs.has_new_version == 'true' && steps.cache_mikrotik.outputs.cache-hit != 'true' && (matrix.arch == 'x86' || matrix.arch == 'arm64')
+    - name: Get mikrotik-${{ env.ROUTEROS_VERSION }}${{ matrix.arch }}.iso
+      if: steps.cache_mikrotik.outputs.cache-hit != 'true' && (matrix.arch == 'x86' || matrix.arch == 'arm64')
       run: |
-        curl -s -o mikrotik.iso https://download.mikrotik.com/routeros/${{ env.LATEST_VERSION }}/mikrotik-${{ env.LATEST_VERSION }}${{ env.ARCH }}.iso
+        sudo curl -s -o mikrotik.iso https://download.mikrotik.com/routeros/$ROUTEROS_VERSION/mikrotik-$ROUTEROS_VERSION${{ matrix.arch }}.iso
 
-    - name: Patch mikrotik iso
-      if: steps.get_latest.outputs.has_new_version == 'true' && (matrix.arch == 'x86' || matrix.arch == 'arm64')
+    - name: Patch mikrotik-${{ env.ROUTEROS_VERSION }}${{ matrix.arch }}.iso
+      if: matrix.arch == 'x86' || matrix.arch == 'arm64'
       run: |
-        sudo mkdir iso new_iso efiboot
+        sudo mkdir iso
         sudo mount -o loop,ro mikrotik.iso iso/
+        sudo mkdir new_iso
         sudo cp -r iso/* new_iso/
-        sudo umount iso && rm -rf iso
-
-        for file in new_iso/*.npk; do
-          sudo -E python3 patch.py npk "$file"
+        sudo rsync -a iso/ new_iso/
+        sudo umount iso/
+        sudo rm -rf iso/
+        NPK_FILES=$(find new_iso/*.npk)
+        for file in $NPK_FILES; do
+          sudo -E python3 patch.py npk $file
         done
-        sudo cp new_iso/routeros-${{ env.LATEST_VERSION }}*.npk routeros-${{ env.LATEST_VERSION }}${{ env.ARCH }}-patched.npk
+        sudo cp new_iso/routeros-$ROUTEROS_VERSION*.npk routeros-$ROUTEROS_VERSION${{ matrix.arch }}-patched.npk
+        sudo mv mikrotik.iso mikrotik-${ROUTEROS_VERSION}${{ matrix.arch }}-patched.iso
 
-        sudo mount -o loop new_iso/efiboot.img efiboot/
-        if [ "${{ matrix.arch }}" == "x86" ]; then
-          sudo -E python3 patch.py kernel efiboot/linux.x86_64
-          sudo cp efiboot/linux.x86_64 new_iso/isolinux/linux
-          sudo umount efiboot
-          sudo mkisofs -o mikrotik-${{ env.LATEST_VERSION }}${{ env.ARCH }}-patched.iso \
-                       -V "MikroTik ${{ env.LATEST_VERSION }} ${{ matrix.arch }}" \
-                       -b isolinux/isolinux.bin -c isolinux/boot.cat \
-                       -no-emul-boot -boot-load-size 4 -boot-info-table \
-                       -eltorito-alt-boot -e efiboot.img -no-emul-boot \
-                       -R -J new_iso/
-        elif [ "${{ matrix.arch }}" == "arm64" ]; then
-          sudo -E python3 patch.py kernel efiboot/EFI/BOOT/BOOTAA64.EFI
-          sudo umount efiboot
-          sudo xorriso -as mkisofs -o mikrotik-${{ env.LATEST_VERSION }}${{ env.ARCH }}-patched.iso \
-                       -V "MikroTik ${{ env.LATEST_VERSION }} ${{ matrix.arch }}" \
-                       -b efiboot.img -no-emul-boot -R -J new_iso/
-        fi
-        rm -rf efiboot new_iso
+    - name: Upload patched files
+      uses: actions/upload-artifact@v4
+      with:
+        name: mikrotik-${{ env.ROUTEROS_VERSION }}-${{ matrix.arch }}
+        path: |
+          mikrotik-${{ env.ROUTEROS_VERSION }}${{ matrix.arch }}-patched.iso
+          routeros-${{ env.ROUTEROS_VERSION }}${{ matrix.arch }}-patched.npk
 
-    - name: Update latest version
-      if: steps.get_latest.outputs.has_new_version == 'true' && matrix.arch == 'x86'
-      run: |
-        echo "${{ env.LATEST_VERSION }} $(date +%s)" > latest7.txt
-        git config user.name "github-actions[bot]"
-        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-        git add latest7.txt
-        git commit -m "Update latest version to ${{ env.LATEST_VERSION }}"
-        git push
+    - name: Download all artifacts
+      if: matrix.arch == 'x86'
+      uses: actions/download-artifact@v4
+      with:
+        path: ./release_files
 
-    - name: Create Release tag ${{ env.LATEST_VERSION }}
-      if: steps.get_latest.outputs.has_new_version == 'true' && matrix.arch == 'x86'
+    - name: Create Release tag ${{ env.ROUTEROS_VERSION }}
+      if: matrix.arch == 'x86'
       uses: softprops/action-gh-release@v2
       with:
-        name: "RouterOS ${{ env.LATEST_VERSION }}"
-        body_path: "CHANGELOG"
-        tag_name: ${{ env.LATEST_VERSION }}
+        name: "RouterOS ${{ env.ROUTEROS_VERSION }}"
+        tag_name: ${{ env.ROUTEROS_VERSION }}
         make_latest: true
-        files: |
-          mikrotik-${{ env.LATEST_VERSION }}${{ env.ARCH }}-patched.iso
-          routeros-${{ env.LATEST_VERSION }}${{ env.ARCH }}-patched.npk
+        files: ./release_files/**/*
